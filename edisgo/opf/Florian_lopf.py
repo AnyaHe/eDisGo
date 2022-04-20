@@ -377,6 +377,7 @@ def setup_model(timeinvariant_parameters, timesteps, optimize_storage=True,
             domain=pm.Integers,
             doc='Contains an ID for each car'
         )
+        # Todo: why NonNegativeReals? Should these not also be integers?
         model.charger_ID_set = pm.Set(
             initialize=model.EV_data['charger_id_set'],
             domain=pm.NonNegativeReals,
@@ -588,7 +589,7 @@ def setup_model(timeinvariant_parameters, timesteps, optimize_storage=True,
             model.time_set,
             model.car_ID_set,
             within=pm.NonNegativeReals,
-        doc = 'Defines the power going out of the battery'
+        doc = 'Defines the power going out of the battery' # Todo: driving/consuming? Discharging sounds like V2G
         )
         model.p_in_ev = pm.Var(
             model.time_set,
@@ -618,7 +619,7 @@ def setup_model(timeinvariant_parameters, timesteps, optimize_storage=True,
             model.time_set,
             model.car_ID_set,
             within=pm.Binary,
-            doc='Binary defining if the car is discharging'
+            doc='Binary defining if the car is discharging' # Todo: driving/consuming?
         )
         model.p_V2G_ev = pm.Var(
             model.time_set,
@@ -1780,7 +1781,7 @@ def create_EV_dict(edisgo_obj, feeder_dir):
             em.car_id.unique()}
         EV_dict['car_id'] = em.car_id.unique()
 
-        for i in EV_dict['time_series'].keys():
+        for i in EV_dict['time_series'].keys(): # Todo: It would be easier to read if you do not use i but time (or whatever i signifies here)
             EV_dict['time_series'][i]['time_index'] = timeseries.index
             EV_dict['time_series'][i]['SOC_min'] = 0
 
@@ -1844,7 +1845,7 @@ def create_EV_dict(edisgo_obj, feeder_dir):
             index=['BEV Kleinwagen', 'BEV Mittelklasse', 'BEV Oberklasse', 'PHEV Kleinwagen', 'PHEV Mittelkasse',
                    'PHEV Oberklasse'], columns=['Maximale Ladeleistung', 'Nutzbare Batteriekapazitaet'])
         EV_dict['Car_Characteristics']['Maximale Ladeleistung'] = [0.120, 0.350, 0.350, 0.120, 0.120, 0.120]
-        EV_dict['Car_Characteristics']['Nutzbare Batteriekapazitaet'] = [0.030, 0.065, 0.090, 0.020, 0.020, 0.020]
+        EV_dict['Car_Characteristics']['Nutzbare Batteriekapazitaet'] = [0.030, 0.065, 0.090, 0.020, 0.020, 0.020] #Todo: Please use english instead :)
 
         EV_dict['charger_time_series'] = {key: pd.DataFrame() for key in EV_dict['charger_id_set']}
         for i in EV_dict['charger_id_set']:
