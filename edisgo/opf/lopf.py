@@ -227,7 +227,7 @@ def setup_model(
         timeinvariant_parameters["grid_object"],
         timeinvariant_parameters["slack"],
     )
-
+    model.edisgo_obj = edisgo_object
     # DEFINE SETS AND FIX PARAMETERS
     print("Setup model: Defining sets and parameters.")
     model.time_set = pm.RangeSet(0, len(timesteps) - 1)
@@ -505,6 +505,9 @@ def add_grid_model_lopf(
     ]
     model.power_factors = pm.Param(
         model.branch_set, model.time_set, initialize=init_power_factors, mutable=True
+    )
+    model.losses = pm.Param(
+        model.branch_set, model.time_set, initialize=0, mutable=True
     )
     # add n-1 security # Todo: make optional?
     # adapt i_lines_allowed for radial feeders
@@ -855,6 +858,16 @@ def update_model(
     return model
 
 
+def update_losses(model, losses):
+    """
+    Method to update losses with values from ACPF.
+    """
+    for b in model.branch_set:
+        for t in model.time_set:
+            model.losses[b, t].set_value(losses.loc[model.timeindex[t], b])
+    return model
+
+
 def optimize(model, solver, load_solutions=True, mode=None):
     """
     Method to run the optimization and extract the results.
@@ -1117,6 +1130,14 @@ def get_underlying_elements(parameters):
             .divide(s_nom)
             .apply(np.square)
         ).apply(np.sqrt)
+        downstream_elements.loc[branch, "branches"] = (
+            parameters["branches"]
+            .loc[
+                parameters["branches"].bus0.isin(relevant_buses)
+                & parameters["branches"].bus1.isin(relevant_buses)
+            ]
+            .index.values
+        )
         if "optimized_storage_units" in parameters:
             downstream_elements.loc[branch, "flexible_storage"] = (
                 parameters["grid_object"]
@@ -1151,7 +1172,7 @@ def get_underlying_elements(parameters):
 
     downstream_elements = pd.DataFrame(
         index=parameters["branches"].index,
-        columns=["buses", "flexible_storage", "flexible_ev"],
+        columns=["buses", "branches", "flexible_storage", "flexible_ev"],
     )
     power_factors = pd.DataFrame(
         index=parameters["branches"].index,
@@ -1247,31 +1268,33 @@ def active_power(model, branch, time):
     :return:
     """
     relevant_buses = model.underlying_branch_elements.loc[branch, "buses"]
+    relevant_branches = model.underlying_branch_elements.loc[branch, "branches"]
     relevant_storage_units = model.underlying_branch_elements.loc[
         branch, "flexible_storage"
     ]
     relevant_charging_points = model.underlying_branch_elements.loc[
         branch, "flexible_ev"
     ]
-    load_flow_on_line = sum(
-        model.nodal_active_power[bus, time] for bus in relevant_buses
+    load_flow_on_line = (
+        sum(model.nodal_active_power[bus, time] for bus in relevant_buses)
+        + model.losses[branch, time]
+        + sum(model.losses[b, time] for b in relevant_branches)
     )
     if hasattr(model, "flexible_charging_points_set"):
-        return model.p_cum[branch, time] == load_flow_on_line + sum(
-            model.charging[storage, time] for storage in relevant_storage_units
-        ) - sum(model.charging_ev[cp, time] for cp in relevant_charging_points) + sum(
-            model.curtailment_load[bus, time]
-            + model.curtailment_ev[bus, time]
-            - model.curtailment_feedin[bus, time]
-            for bus in relevant_buses
-        )
+        ev_curtailment = sum(model.curtailment_ev[bus, time] for bus in relevant_buses)
     else:
-        return model.p_cum[branch, time] == load_flow_on_line + sum(
-            model.charging[storage, time] for storage in relevant_storage_units
-        ) + sum(
+        ev_curtailment = 0
+    return (
+        model.p_cum[branch, time]
+        == load_flow_on_line
+        + sum(model.charging[storage, time] for storage in relevant_storage_units)
+        - sum(model.charging_ev[cp, time] for cp in relevant_charging_points)
+        + sum(
             model.curtailment_load[bus, time] - model.curtailment_feedin[bus, time]
             for bus in relevant_buses
         )
+        + ev_curtailment
+    )
 
 
 def upper_active_power(model, branch, time):
