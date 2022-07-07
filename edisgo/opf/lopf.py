@@ -170,7 +170,8 @@ def prepare_time_invariant_parameters(
             * np.square(parameters["v_nom"])
             / parameters["grid_object"].transformers_df.s_nom
         )
-    parameters["branches"] = concat_parallel_branch_elements(parameters["grid_object"])
+    parameters["branches"], parameters["branch_mapping"] = \
+        concat_parallel_branch_elements(parameters["grid_object"])
     (
         parameters["underlying_branch_elements"],
         parameters["power_factors"],
@@ -500,6 +501,7 @@ def add_grid_model_lopf(
     model.v_slack = v_slack
     model.branches = timeinvariant_parameters["branches"]
     model.branch_set = pm.Set(initialize=model.branches.index)
+    model.branch_mapping = timeinvariant_parameters["branch_mapping"]
     model.underlying_branch_elements = timeinvariant_parameters[
         "underlying_branch_elements"
     ]
@@ -1052,17 +1054,19 @@ def concat_parallel_branch_elements(grid_object):
     -------
 
     """
-    lines = fuse_parallel_branches(grid_object.lines_df)
+    lines, mapping_lines = fuse_parallel_branches(grid_object.lines_df)
     trafos = grid_object.transformers_df.loc[
         grid_object.transformers_df.bus0.isin(grid_object.buses_df.index)
     ].loc[grid_object.transformers_df.bus1.isin(grid_object.buses_df.index)]
-    transformers = fuse_parallel_branches(trafos)
-    return pd.concat([lines, transformers], sort=False)
+    transformers, mapping_trafos = fuse_parallel_branches(trafos)
+    mapping_lines.update(mapping_trafos)
+    return pd.concat([lines, transformers], sort=False), mapping_lines
 
 
 def fuse_parallel_branches(branches):
     branches_tmp = branches[["bus0", "bus1"]]
     parallel_branches = pd.DataFrame(columns=branches.columns)
+    mapping_fused_branches = {}
     if branches_tmp.duplicated().any():
         duplicated_branches = branches_tmp.loc[branches_tmp.duplicated(keep=False)]
         duplicated_branches["visited"] = False
@@ -1083,10 +1087,11 @@ def fuse_parallel_branches(branches):
                     branches.loc[parallel_branches_tmp.index, ["r", "x", "s_nom"]],
                     pu=False,
                 )
+                mapping_fused_branches[name_par] = parallel_branches_tmp.index
     fused_branches = pd.concat(
         [branches.loc[branches_tmp.index], parallel_branches], sort=False
     )
-    return fused_branches
+    return fused_branches, mapping_fused_branches
 
 
 def get_underlying_elements(parameters):
