@@ -170,7 +170,8 @@ def prepare_time_invariant_parameters(
             * np.square(parameters["v_nom"])
             / parameters["grid_object"].transformers_df.s_nom
         )
-    parameters["branches"] = concat_parallel_branch_elements(parameters["grid_object"])
+    parameters["branches"], parameters["branch_mapping"] = \
+        concat_parallel_branch_elements(parameters["grid_object"])
     (
         parameters["underlying_branch_elements"],
         parameters["power_factors"],
@@ -500,6 +501,7 @@ def add_grid_model_lopf(
     model.v_slack = v_slack
     model.branches = timeinvariant_parameters["branches"]
     model.branch_set = pm.Set(initialize=model.branches.index)
+    model.branch_mapping = timeinvariant_parameters["branch_mapping"]
     model.underlying_branch_elements = timeinvariant_parameters[
         "underlying_branch_elements"
     ]
@@ -858,6 +860,91 @@ def update_model(
     return model
 
 
+def run_codistflow(model, edisgo_orig, timesteps, tol=1e-4, max_iter=10, solver="gurobi"):
+    losses = pd.DataFrame(index=timesteps, columns=model.branches.index, data=1)
+    losses_pre = pd.DataFrame(index=timesteps, columns=model.branches.index, data=0)
+    for iter in range(max_iter):
+        if ((losses - losses_pre).abs() > tol).any().any():
+            edisgo_obj = deepcopy(edisgo_orig)
+            print(
+                f"Losses: Starting iteration {iter}. \n"
+                f"Maximum absolute deviation: {(losses - losses_pre).abs().max().max()}"
+            )
+            results = optimize(model, solver)
+
+            # iteration losses
+            losses_pre = (
+                pd.Series(model.losses.extract_values()).unstack().T.iloc[:len(timesteps)].set_index(timesteps)
+            )
+            # Add optimised ev charging
+            edisgo_obj.timeseries._charging_points_active_power.loc[
+            :, results["x_charge_ev"].columns
+            ] = results["x_charge_ev"]
+            # Add curtailment as new loads and feedin to grid
+            curtailment_load = results["curtailment_load"] + results["curtailment_ev"]
+            curtailment_load = curtailment_load[
+                curtailment_load.columns[curtailment_load.sum() > 0]
+            ]
+            curtailment_reactive_load = results["curtailment_reactive_load"][
+                curtailment_load.columns
+            ]
+            curtailment_feedin = results["curtailment_feedin"]
+            curtailment_feedin = curtailment_feedin[
+                curtailment_feedin.columns[curtailment_feedin.sum() > 0]
+            ]
+            curtailment_reactive_feedin = results["curtailment_reactive_feedin"][
+                curtailment_feedin.columns
+            ]
+
+            edisgo_obj.timeseries.mode = "manual"
+            edisgo_obj.timeseries.timeindex = timesteps
+
+            edisgo_obj.add_components(
+                "Generator",
+                ts_active_power=-curtailment_feedin,
+                ts_reactive_power=-curtailment_reactive_feedin,
+                buses=curtailment_feedin.columns,
+                generator_ids=curtailment_feedin.columns,
+                p_noms=curtailment_feedin.max().values,
+                generator_types=["feedin_curtailment"] * len(curtailment_feedin.columns),
+            )
+            edisgo_obj.add_components(
+                "Load",
+                ts_active_power=-curtailment_load,
+                ts_reactive_power=-curtailment_reactive_load,
+                buses=curtailment_load.columns,
+                load_ids=curtailment_load.columns,
+                peak_loads=curtailment_load.max().values,
+                annual_consumptions=curtailment_load.sum().values,
+                sectors=["load_curtailment"] * len(curtailment_load.columns),
+            )
+            # run power flow and extract losses
+            pypsa_obj = edisgo_obj.to_pypsa()
+            pypsa_obj.pf(timesteps)
+            losses = pd.concat(
+                [
+                    pypsa_obj.lines_t.p0 + pypsa_obj.lines_t.p1,
+                    pypsa_obj.transformers_t.p0 + pypsa_obj.transformers_t.p1,
+                ],
+                axis=1,
+            )
+            losses_q = pd.concat(
+                [
+                    pypsa_obj.lines_t.q0 + pypsa_obj.lines_t.q1,
+                    pypsa_obj.transformers_t.q0 + pypsa_obj.transformers_t.q1,
+                ],
+                axis=1,
+            )
+            # update model with losses
+            for new_name, indices in model.branch_mapping.items():
+                tmp = losses[indices]
+                losses.drop(columns=indices, inplace=True)
+                losses[new_name] = tmp.sum(axis=1)
+            update_losses(model, losses)
+        else:
+            return results
+
+
 def update_losses(model, losses):
     """
     Method to update losses with values from ACPF.
@@ -1052,17 +1139,19 @@ def concat_parallel_branch_elements(grid_object):
     -------
 
     """
-    lines = fuse_parallel_branches(grid_object.lines_df)
+    lines, mapping_lines = fuse_parallel_branches(grid_object.lines_df)
     trafos = grid_object.transformers_df.loc[
         grid_object.transformers_df.bus0.isin(grid_object.buses_df.index)
     ].loc[grid_object.transformers_df.bus1.isin(grid_object.buses_df.index)]
-    transformers = fuse_parallel_branches(trafos)
-    return pd.concat([lines, transformers], sort=False)
+    transformers, mapping_trafos = fuse_parallel_branches(trafos)
+    mapping_lines.update(mapping_trafos)
+    return pd.concat([lines, transformers], sort=False), mapping_lines
 
 
 def fuse_parallel_branches(branches):
     branches_tmp = branches[["bus0", "bus1"]]
     parallel_branches = pd.DataFrame(columns=branches.columns)
+    mapping_fused_branches = {}
     if branches_tmp.duplicated().any():
         duplicated_branches = branches_tmp.loc[branches_tmp.duplicated(keep=False)]
         duplicated_branches["visited"] = False
@@ -1083,10 +1172,11 @@ def fuse_parallel_branches(branches):
                     branches.loc[parallel_branches_tmp.index, ["r", "x", "s_nom"]],
                     pu=False,
                 )
+                mapping_fused_branches[name_par] = parallel_branches_tmp.index
     fused_branches = pd.concat(
         [branches.loc[branches_tmp.index], parallel_branches], sort=False
     )
-    return fused_branches
+    return fused_branches, mapping_fused_branches
 
 
 def get_underlying_elements(parameters):

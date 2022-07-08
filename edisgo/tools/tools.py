@@ -4,6 +4,7 @@ import pandas as pd
 import networkx as nx
 from math import pi, sqrt
 from sqlalchemy import func
+from copy import deepcopy
 
 from edisgo.flex_opt import exceptions
 from edisgo.flex_opt import check_tech_constraints
@@ -648,7 +649,8 @@ def get_timeseries_per_node(grid, edisgo, component, component_names=None):
     return nodal_active_power_all_buses, nodal_reactive_power_all_buses
 
 
-def convert_impedances_to_mv(edisgo):
+def convert_impedances_to_mv(edisgo_orig):
+    edisgo = deepcopy(edisgo_orig)
     for lv_grid in edisgo.topology.mv_grid.lv_grids:
         k = edisgo.topology.mv_grid.nominal_voltage / lv_grid.nominal_voltage
         edisgo.topology.lines_df.loc[lv_grid.lines_df.index, 'r'] = \
