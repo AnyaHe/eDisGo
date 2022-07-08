@@ -1040,14 +1040,14 @@ def _worst_case_generation(edisgo_obj, modes, generator_names=None):
     worst_case_ts = pd.DataFrame(
         {
             "solar": [
-                worst_case_scale_factors["{}_feedin_pv".format(mode)] for mode in modes
+                worst_case_scale_factors["{}_feed-in_pv".format(mode)] for mode in modes
             ],
             "wind": [
-                worst_case_scale_factors["{}_feedin_wind".format(mode)]
+                worst_case_scale_factors["{}_feed-in_wind".format(mode)]
                 for mode in modes
             ],
             "other": [
-                worst_case_scale_factors["{}_feedin_other".format(mode)]
+                worst_case_scale_factors["{}_feed-in_other".format(mode)]
                 for mode in modes
             ],
         },
@@ -1815,8 +1815,8 @@ def _get_worst_case_modes(mode):
         list which can contains 'feedin-case', 'load_case' or both
     """
     if mode == "worst-case":
-        modes = ["feedin_case", "load_case"]
-    elif mode == "worst-case-feedin" or mode == "worst-case-load":
+        modes = ["feed-in_case", "load_case"]
+    elif mode == "worst-case-feed-in" or mode == "worst-case-load":
         modes = ["{}_case".format(mode.split("-")[-1])]
     else:
         raise ValueError("{} is not a valid mode.".format(mode))
