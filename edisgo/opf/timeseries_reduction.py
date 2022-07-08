@@ -1,20 +1,19 @@
 import logging
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 from edisgo.flex_opt import check_tech_constraints
-
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
+from results_helper_functions import relative_load, voltage_diff
 
 logger = logging.getLogger(__name__)
 
 
 def _scored_critical_current(edisgo_obj, grid):
     # Get allowed current per line per time step
-    i_lines_allowed = check_tech_constraints.lines_allowed_load(
-        edisgo_obj, "mv"
-    )
+    i_lines_allowed = check_tech_constraints.lines_allowed_load(edisgo_obj, "mv")
     i_lines_pfa = edisgo_obj.results.i_res[grid.lines_df.index]
 
     # Get current relative to allowed current
@@ -32,6 +31,29 @@ def _scored_critical_current(edisgo_obj, grid):
     return crit_lines_score.sort_values(ascending=False)
 
 
+def _scored_most_critical_current(edisgo_obj):
+
+    # Get current relative to allowed current
+    relative_i_res = relative_load(edisgo_obj)
+
+    # Get only timesteps that are maximum loading of at least one component
+    # relative_i_res_tmp = relative_i_res.loc[list(set(relative_i_res.idxmax().values))]
+
+    # Get lines that have violations
+    crit_lines_score = relative_i_res[relative_i_res > 1]
+
+    # Remove time steps with no violations
+    crit_lines_score = crit_lines_score.dropna(how="all", axis=0)
+
+    # Get most critical timesteps per component
+    if not crit_lines_score.empty:
+        idx_max = list(set(crit_lines_score.idxmax().dropna().values))
+
+        crit_lines_score = crit_lines_score.loc[idx_max] - 1
+    crit_lines_score = crit_lines_score.sum(axis=1)
+    return crit_lines_score.sort_values(ascending=False)
+
+
 def _scored_critical_overvoltage(edisgo_obj, grid):
     nodes = grid.buses_df.index
 
@@ -43,38 +65,88 @@ def _scored_critical_overvoltage(edisgo_obj, grid):
         edisgo_obj, voltage_levels="mv"
     )
     _, voltage_diff_ov = check_tech_constraints.voltage_diff(
-        edisgo_obj,
-        nodes,
-        v_dev_allowed_upper,
-        v_dev_allowed_lower
+        edisgo_obj, nodes, v_dev_allowed_upper, v_dev_allowed_lower
     )
 
     # Get score for nodes that are over or under the allowed deviations
     voltage_diff_ov = (
-        voltage_diff_ov[voltage_diff_ov > 0]
-        .dropna(axis=1, how="all")
-        .sum(axis=0)
+        voltage_diff_ov[voltage_diff_ov > 0].dropna(axis=1, how="all").sum(axis=0)
     )
     return voltage_diff_ov.sort_values(ascending=False)
 
 
-def get_steps_curtailment(edisgo_obj, percentage=0.5):
+def _scored_most_critical_voltage_issues(edisgo_obj):
+    voltage_diff_ov = voltage_diff(edisgo_obj)
+
+    # Get score for nodes that are over or under the allowed deviations
+    voltage_diff_ov = voltage_diff_ov.abs()[voltage_diff_ov.abs() > 0].dropna(
+        axis=0, how="all"
+    )
+    if not voltage_diff_ov.empty:
+        # Get index of most critical timesteps
+        idx_max = list(set(voltage_diff_ov.idxmax().dropna().values))
+        # Get sum of all violations at most critical steps
+        voltage_diff_ov = voltage_diff_ov.loc[idx_max]
+    voltage_diff_ov = voltage_diff_ov.sum(axis=1)
+
+    return voltage_diff_ov.sort_values(ascending=False)
+
+
+def get_steps_reinforcement(edisgo_obj, percentage=1.0):
     """
     Get the time steps with the most critical violations for curtailment
     optimization.
-
     Parameters
     -----------
     edisgo_obj : :class:`~.EDisGo`
         The eDisGo API object
     percentage : float
         The percentage of most critical time steps to select
-
     Returns
     --------
     `pandas.DatetimeIndex`
         the reduced time index for modeling curtailment
+    """
+    # Run power flow if not available
+    if edisgo_obj.results.i_res is None or edisgo_obj.results.i_res.empty:
+        logger.debug("Running initial power flow")
+        edisgo_obj.analyze()
 
+    # Select most critical steps based on current violations
+    current_scores = _scored_most_critical_current(edisgo_obj)
+    num_steps_current = int(len(current_scores) * percentage)
+    steps = current_scores[:num_steps_current].index.tolist()
+
+    # Select most critical steps based on voltage violations
+    voltage_scores = _scored_most_critical_voltage_issues(edisgo_obj)
+    num_steps_voltage = int(len(voltage_scores) * percentage)
+    steps.extend(
+        voltage_scores[:num_steps_voltage].index.tolist()
+    )  # Todo: Can this cause duplicated?
+
+    if len(steps) == 0:
+        logger.warning("No critical steps detected. No network expansion required.")
+
+    # Strip duplicates
+    steps = list(dict.fromkeys(steps))
+
+    return pd.DatetimeIndex(steps)
+
+
+def get_steps_curtailment(edisgo_obj, percentage=0.5):
+    """
+    Get the time steps with the most critical violations for curtailment
+    optimization.
+    Parameters
+    -----------
+    edisgo_obj : :class:`~.EDisGo`
+        The eDisGo API object
+    percentage : float
+        The percentage of most critical time steps to select
+    Returns
+    --------
+    `pandas.DatetimeIndex`
+        the reduced time index for modeling curtailment
     """
 
     # Run power flow if not available
@@ -98,9 +170,7 @@ def get_steps_curtailment(edisgo_obj, percentage=0.5):
     steps.extend(get_steps_storage(edisgo_obj, window=0).tolist())
 
     if len(steps) == 0:
-        logger.warning(
-            "No critical steps detected. No network expansion required."
-        )
+        logger.warning("No critical steps detected. No network expansion required.")
 
     # Strip duplicates
     steps = list(dict.fromkeys(steps))
@@ -111,7 +181,6 @@ def get_steps_curtailment(edisgo_obj, percentage=0.5):
 def get_steps_storage(edisgo_obj, window=5):
     """
     Get the most critical time steps from series for storage problems.
-
     Parameters
     -----------
     edisgo_obj : :class:`~.EDisGo`
@@ -119,12 +188,10 @@ def get_steps_storage(edisgo_obj, window=5):
     window : int
         The additional hours to include before and after each critical time
         step.
-
     Returns
     -------
     `pandas.DatetimeIndex`
         the reduced time index for modeling storage
-
     """
     # Run power flow if not available
     if edisgo_obj.results.i_res is None:
@@ -141,14 +208,14 @@ def get_steps_storage(edisgo_obj, window=5):
         nodes = pd.DataFrame(v)
         if "time_index" in nodes:
             for step in nodes["time_index"]:
-                if not step in crit_periods:
+                if step not in crit_periods:
                     crit_periods.append(step)
 
     # Get periods with current violations
     crit_lines = check_tech_constraints.mv_line_load(edisgo_obj)
     if "time_index" in crit_lines:
         for step in crit_lines["time_index"]:
-            if not step in crit_periods:
+            if step not in crit_periods:
                 crit_periods.append(step)
 
     reduced = []
@@ -164,9 +231,7 @@ def get_steps_storage(edisgo_obj, window=5):
     reduced = list(dict.fromkeys(reduced))
 
     if len(reduced) == 0:
-        logger.warning(
-            "No critical steps detected. No network expansion required."
-        )
+        logger.warning("No critical steps detected. No network expansion required.")
 
     return pd.DatetimeIndex(reduced)
 
@@ -175,7 +240,6 @@ def get_linked_steps(cluster_params, num_steps=24, keep_steps=[]):
     """
     Use provided data to identify representative time steps and create mapping
     Dict that can be passed to optimization
-
     Parameters
     -----------
     cluster_params : :pandas:`pandas.DataFrame<DataFrame>`
@@ -186,13 +250,11 @@ def get_linked_steps(cluster_params, num_steps=24, keep_steps=[]):
     keep_steps : Iterable of the same type as cluster_params.index
         Time steps to retain with full resolution, regardless of
         clustering result.
-
     Returns
     -------
     dict
         Dictionary where each represented time step is a key and its
         representative time step is a value.
-
     """
 
     # From all values, find the subvector with the smallest SSD to a given
